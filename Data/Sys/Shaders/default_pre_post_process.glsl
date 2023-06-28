@@ -99,6 +99,78 @@ float4 SharpBilinearSample(float3 uvw, float gamma)
 	return BilinearSample(uvw, gamma);
 }
 
+float4 BoxSample(float3 uvw, float gamma) 
+{
+	float2 source_size = GetResolution();
+	float2 inverted_source_size = GetInvResolution();
+	float2 target_size = GetTargetResolution();
+
+	float2 beg = uvw.xy * source_size;
+	float2 range = source_size / target_size;
+	float2 end = beg + range;
+
+	float fx_beg = floor(beg.x);
+	float fx_end = floor(end.x);
+	float fy_beg = floor(beg.y);
+	float fy_end = floor(end.y);
+
+	float px_beg = 1.0 + fx_beg - beg.x;
+	float py_beg = 1.0 + fy_beg - beg.y;
+
+	float px_end = end.x - fx_end;
+	float py_end = end.y - fy_end;
+
+	float total = 0.0;
+	float4 avg = float4(0.0, 0.0, 0.0, 0.0);
+
+	// These are the 4 samples on the corners of the boxes
+	float bb = px_beg * py_beg;
+	avg += bb * QuickSample(float3(fx_beg, fy_beg, uvw.w), gamma);
+	total += bb;
+
+	float eb = px_end * py_beg;
+	avg += eb * QuickSample(float3(fx_end, fy_beg, uvw.w), gamma);
+	total += eb;
+
+	float be = px_beg * py_end;
+	avg += be * QuickSample(float3(fx_beg, fy_end, uvw.w), gamma);
+	total += be;
+
+	float ee = px_end * py_end;
+	avg += ee * QuickSample(float3(fx_end, fy_end, uvw.w), gamma);
+	total += ee;
+
+	int ixrange = int(fx_end - fx_beg - 0.5);
+	int iyrange = int(fy_end - fy_beg - 0.5);
+
+	// This gets the top and bottom edges
+	for (int ix = 0; ix < ixrange; ++ix) {
+		float x = fx_beg + 1.0 + ix;
+		avg += py_beg * QuickSample(float3(x, fy_beg, uvw.w), gamma);
+		avg += py_end * QuickSample(float3(x, fy_end, uvw.w), gamma);
+		total += py_beg;
+		total += py_end;
+	}
+
+	// This gets the left and right edges of the sample and everything inbetween
+	for (int iy = 0; iy < iyrange; ++iy) {
+		float y = fy_beg + 1.0 + iy;
+	
+		avg += px_beg * QuickSample(float3(fx_beg, y, uvw.w), gamma);
+		avg += px_end * QuickSample(float3(fx_end, y, uvw.w), gamma);
+		total += px_beg;
+		total += px_end;
+
+		for (int ix = 0; ix < ixrange; ++ix) {
+			float x = fx_beg + 1.0 + ix;
+			avg += QuickSample(float3(x, y, uvw.w), gamma);
+			total += 1.0;
+		}
+	}
+
+	return avg / total;
+}
+
 float4 Cubic(float v)
 {
 	float4 n = float4(1.0, 2.0, 3.0, 4.0) - v;
@@ -278,6 +350,10 @@ float4 LinearGammaCorrectedSample(float gamma)
 	else if (resampling_method == 6) // Sharp Bilinear
 	{
 		color = SharpBilinearSample(uvw, gamma);
+	}
+	else if (resampling_method == 7) // BoxSampling
+	{
+		color = BoxSample(uvw, gamma);
 	}
 
 	return color;

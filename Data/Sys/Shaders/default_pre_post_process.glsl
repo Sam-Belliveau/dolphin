@@ -22,7 +22,7 @@ mat3 from_PAL = transpose(mat3(
 float3 LinearTosRGBGamma(float3 color)
 {
 	float a = 0.055;
-	
+
 	for (int i = 0; i < 3; ++i)
 	{
 		float x = color[i];
@@ -39,7 +39,8 @@ float3 LinearTosRGBGamma(float3 color)
 // Non filtered gamma corrected sample (nearest neighbor)
 float4 QuickSample(float3 uvw, float gamma)
 {
-	float4 color = texture(samp1, uvw);
+	float2 pixel = floor(uvw.xy * GetResolution()) + float2(0.5, 0.5);
+	float4 color = SampleLocation(pixel * GetInvResolution());
 	color.rgb = pow(color.rgb, gamma.xxx);
 	return color;
 }
@@ -54,7 +55,7 @@ float4 BilinearSample(float3 uvw, float gamma)
 	// This emulates the (bi)linear filtering done directly from GPUs HW.
 	// Note that GPUs might natively filter red green and blue differently, but we don't do it.
 	// They might also use different filtering between upscaling and downscaling.
-	
+
 	float2 source_size = GetResolution();
 	float2 inverted_source_size = GetInvResolution();
 	float2 pixel = (uvw.xy * source_size) - 0.5; // Try to find the matching pixel top left corner
@@ -99,76 +100,77 @@ float4 SharpBilinearSample(float3 uvw, float gamma)
 	return BilinearSample(uvw, gamma);
 }
 
-float4 BoxSample(float3 uvw, float gamma) 
+// By Sam Belliveau. Public Domain license.
+// Effectively a more accurate sharp bilinear filter when upscaling,
+// that also works as a mathematically perfect downscale filter.
+float4 BoxResample(float3 uvw, float gamma)
 {
-	float2 source_size = GetResolution();
-	float2 inverted_source_size = GetInvResolution();
-	float2 target_size = GetTargetResolution();
+	// Determine the sizes of the source and target images.
+	const float2 inv_size = GetInvResolution();
+	const float2 source_size = GetResolution();
+	const float2 target_size = GetTargetResolution();
 
-	float2 beg = uvw.xy * source_size;
-	float2 range = source_size / target_size;
-	float2 end = beg + range;
+	// Determine the range of the source image that the target pixel will cover.
+	const float2 range = source_size / target_size;
+	const float2 beg = uvw.xy * source_size;
+	const float2 end = beg + range;
 
-	float fx_beg = floor(beg.x);
-	float fx_end = floor(end.x);
-	float fy_beg = floor(beg.y);
-	float fy_end = floor(end.y);
+	// Compute the top-left and bottom-right corners of the pixel box.
+	const float2 f_beg = floor(beg);
+	const float2 f_end = floor(end);
 
-	float px_beg = 1.0 + fx_beg - beg.x;
-	float py_beg = 1.0 + fy_beg - beg.y;
+	// Compute how much of the start and end pixels are covered horizontally & vertically.
+	const float area_w = 1.0 - fract(beg.x);
+	const float area_n = 1.0 - fract(beg.y);
+	const float area_e = fract(end.x);
+	const float area_s = fract(end.y);
 
-	float px_end = end.x - fx_end;
-	float py_end = end.y - fy_end;
+	// Compute the areas of the corner pixels in the pixel box.
+	const float area_nw = area_n * area_w;
+	const float area_ne = area_n * area_e;
+	const float area_sw = area_s * area_w;
+	const float area_se = area_s * area_e;
 
-	float total = 0.0;
-	float4 avg = float4(0.0, 0.0, 0.0, 0.0);
+	// Initialize the color accumulator.
+	float4 avg_color = float4(0.0, 0.0, 0.0, 0.0);
 
-	// These are the 4 samples on the corners of the boxes
-	float bb = px_beg * py_beg;
-	avg += bb * QuickSample(float3(fx_beg, fy_beg, uvw.w), gamma);
-	total += bb;
+	// Accumulate corner pixels.
+	avg_color += area_nw * QuickSample(float2(f_beg.x, f_beg.y) * inv_size, uvw.z, gamma);
+	avg_color += area_ne * QuickSample(float2(f_end.x, f_beg.y) * inv_size, uvw.z, gamma);
+	avg_color += area_sw * QuickSample(float2(f_beg.x, f_end.y) * inv_size, uvw.z, gamma);
+	avg_color += area_se * QuickSample(float2(f_end.x, f_end.y) * inv_size, uvw.z, gamma);
 
-	float eb = px_end * py_beg;
-	avg += eb * QuickSample(float3(fx_end, fy_beg, uvw.w), gamma);
-	total += eb;
+	// Determine the size of the pixel box.
+	const int x_range = int(f_end.x - f_beg.x - 0.5);
+	const int y_range = int(f_end.y - f_beg.y - 0.5);
 
-	float be = px_beg * py_end;
-	avg += be * QuickSample(float3(fx_beg, fy_end, uvw.w), gamma);
-	total += be;
-
-	float ee = px_end * py_end;
-	avg += ee * QuickSample(float3(fx_end, fy_end, uvw.w), gamma);
-	total += ee;
-
-	int ixrange = int(fx_end - fx_beg - 0.5);
-	int iyrange = int(fy_end - fy_beg - 0.5);
-
-	// This gets the top and bottom edges
-	for (int ix = 0; ix < ixrange; ++ix) {
-		float x = fx_beg + 1.0 + ix;
-		avg += py_beg * QuickSample(float3(x, fy_beg, uvw.w), gamma);
-		avg += py_end * QuickSample(float3(x, fy_end, uvw.w), gamma);
-		total += py_beg;
-		total += py_end;
+	// Accumulate top and bottom edge pixels.
+	for (int ix = 0; ix < x_range; ++ix) {
+		const float x = f_beg.x + 1.0 + float(ix);
+		avg_color += area_n * QuickSample(float2(x, f_beg.y) * inv_size, uvw.z, gamma);
+		avg_color += area_s * QuickSample(float2(x, f_end.y) * inv_size, uvw.z, gamma);
 	}
 
-	// This gets the left and right edges of the sample and everything inbetween
-	for (int iy = 0; iy < iyrange; ++iy) {
-		float y = fy_beg + 1.0 + iy;
-	
-		avg += px_beg * QuickSample(float3(fx_beg, y, uvw.w), gamma);
-		avg += px_end * QuickSample(float3(fx_end, y, uvw.w), gamma);
-		total += px_beg;
-		total += px_end;
+	// Accumulate left and right edge pixels and all the pixels in between.
+	for (int iy = 0; iy < y_range; ++iy) {
+		const float y = f_beg.y + 1.0 + float(iy);
 
-		for (int ix = 0; ix < ixrange; ++ix) {
-			float x = fx_beg + 1.0 + ix;
-			avg += QuickSample(float3(x, y, uvw.w), gamma);
-			total += 1.0;
+		avg_color += area_w * QuickSample(float2(f_beg.x, y) * inv_size, uvw.z, gamma);
+		avg_color += area_e * QuickSample(float2(f_end.x, y) * inv_size, uvw.z, gamma);
+
+		for (int ix = 0; ix < x_range; ++ix) {
+			const float x = f_beg.x + 1.0 + float(ix);
+			avg_color += QuickSample(float2(x, y) * inv_size, uvw.z, gamma);
 		}
 	}
 
-	return avg / total;
+	// Compute the area of the pixel box that was sampled.
+	const float area_corners = area_nw + area_ne + area_sw + area_se;
+	const float area_edges = float(x_range) * (area_n + area_s) + float(y_range) * (area_w + area_e);
+	const float area_center = float(x_range) * float(y_range);
+
+	// Return the normalized average color.
+	return avg_color / (area_corners + area_edges + area_center);
 }
 
 float4 Cubic(float v)
@@ -191,11 +193,11 @@ float4 BicubicSample(float3 uvw, float2 in_source_resolution, float2 in_inverted
 
 	float4 xcubic = Cubic(frac_pixel.x);
 	float4 ycubic = Cubic(frac_pixel.y);
-	
+
 	float4 c = float4(int_pixel.x - 0.5, int_pixel.x + 1.5, int_pixel.y - 0.5, int_pixel.y + 1.5);
 	float4 s = float4(xcubic.x + xcubic.y, xcubic.z + xcubic.w, ycubic.x + ycubic.y, ycubic.z + ycubic.w);
 	float4 offset = c + float4(xcubic.y, xcubic.w, ycubic.y, ycubic.w) / s;
-	
+
 	offset *= in_inverted_source_resolution.xxyy;
 
 	float4 sample0 = QuickSample(offset.xz, uvw.z, gamma);
@@ -226,24 +228,24 @@ float4 BicubicHermiteSample(float3 uvw, float2 in_source_resolution, float2 in_i
 	float2 pixel = (uvw.xy * in_source_resolution) + 0.5;
 	float2 frac_pixel = fract(pixel);
 	float2 uv = (floor(pixel) * in_inverted_source_resolution) - (in_inverted_source_resolution / 2.0);
-	
+
 	float2 inverted_source_resolution_double = in_inverted_source_resolution * 2.0;
 
 	float4 c00 = QuickSample(uv + float2(-in_inverted_source_resolution.x,			-in_inverted_source_resolution.y), uvw.z, gamma);
 	float4 c10 = QuickSample(uv + float2(	0.0,																	-in_inverted_source_resolution.y), uvw.z, gamma);
 	float4 c20 = QuickSample(uv + float2(	in_inverted_source_resolution.x,			-in_inverted_source_resolution.y), uvw.z, gamma);
 	float4 c30 = QuickSample(uv + float2(	inverted_source_resolution_double.x,	-in_inverted_source_resolution.y), uvw.z, gamma);
-	
+
 	float4 c01 = QuickSample(uv + float2(-in_inverted_source_resolution.x,			0.0), uvw.z, gamma);
 	float4 c11 = QuickSample(uv + float2(	0.0,																	0.0), uvw.z, gamma);
 	float4 c21 = QuickSample(uv + float2(	in_inverted_source_resolution.x,			0.0), uvw.z, gamma);
 	float4 c31 = QuickSample(uv + float2(	inverted_source_resolution_double.x,	0.0), uvw.z, gamma);
-	
+
 	float4 c02 = QuickSample(uv + float2(-in_inverted_source_resolution.x,			in_inverted_source_resolution.y), uvw.z, gamma);
 	float4 c12 = QuickSample(uv + float2(	0.0,																	in_inverted_source_resolution.y), uvw.z, gamma);
 	float4 c22 = QuickSample(uv + float2(	in_inverted_source_resolution.x,			in_inverted_source_resolution.y), uvw.z, gamma);
 	float4 c32 = QuickSample(uv + float2(	inverted_source_resolution_double.x,	in_inverted_source_resolution.y), uvw.z, gamma);
-	
+
 	float4 c03 = QuickSample(uv + float2(-in_inverted_source_resolution.x,			inverted_source_resolution_double.y), uvw.z, gamma);
 	float4 c13 = QuickSample(uv + float2(	0.0,																	inverted_source_resolution_double.y), uvw.z, gamma);
 	float4 c23 = QuickSample(uv + float2(	in_inverted_source_resolution.x,			inverted_source_resolution_double.y), uvw.z, gamma);
@@ -324,9 +326,9 @@ float4 BicubicCatmullRomSample(float3 uvw, float2 in_source_resolution, float2 i
 // Outputs in linear space for simplicity.
 float4 LinearGammaCorrectedSample(float gamma)
 {
-	float3 uvw = v_tex0;
+	float3 uvw = float3(GetCoordinates(), 0.0);
 	float4 color = float4(0, 0, 0, 1);
-	
+
 	if (resampling_method <= 1) // Bilinear
 	{
 		color = BilinearSample(uvw, gamma);
@@ -353,7 +355,7 @@ float4 LinearGammaCorrectedSample(float gamma)
 	}
 	else if (resampling_method == 7) // BoxSampling
 	{
-		color = BoxSample(uvw, gamma);
+		color = BoxResample(uvw, gamma);
 	}
 
 	return color;
@@ -366,7 +368,7 @@ void main()
 	const bool needs_rescaling = GetResolution() != GetTargetResolution();
 
 	const bool needs_resampling = needs_rescaling && (OptionEnabled(hdr_output) || OptionEnabled(correct_gamma) || !raw_resampling);
-	
+
 	float4 color;
 
 	if (needs_resampling)
@@ -386,7 +388,7 @@ void main()
 			color = texture(samp0, v_tex0);
 		else
 			color = texture(samp1, v_tex0);
-		
+
 		// Convert to linear before doing any other of follow up operations.
 		color.rgb = pow(color.rgb, game_gamma.xxx);
 	}
@@ -400,13 +402,13 @@ void main()
 		else if (game_color_space == 2)
 			color.rgb = color.rgb * from_PAL;
 	}
-	
+
 	if (OptionEnabled(hdr_output))
 	{
 		const float hdr_paper_white = hdr_paper_white_nits / hdr_sdr_white_nits;
 		color.rgb *= hdr_paper_white;
 	}
-	
+
 	if (OptionEnabled(linear_space_output))
 	{
 		// Nothing to do here

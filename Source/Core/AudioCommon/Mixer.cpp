@@ -67,7 +67,11 @@ void Mixer::MixerFifo::Mix(s16* samples, std::size_t num_samples)
 
   float emulation_speed = m_mixer->m_config_emulation_speed;
   if (0 < emulation_speed && emulation_speed != 1.0)
-    in_sample_rate = static_cast<uint64_t>(std::round(in_sample_rate * emulation_speed));
+    in_sample_rate = static_cast<uint64_t>(std::llround(in_sample_rate * emulation_speed));
+
+  /* TODO: Check for framerate Rounding */
+  if (false)
+    in_sample_rate = (1001 * in_sample_rate) / 1000;
 
   uint32_t index_jump = (in_sample_rate << GRANULE_BUFFER_FRAC_BITS) / (out_sample_rate);
 
@@ -79,11 +83,11 @@ void Mixer::MixerFifo::Mix(s16* samples, std::size_t num_samples)
     sample *= volume;
 
     sample.l += samples[0] + m_quantization_error.l;
-    samples[0] = ToShort(sample.l);
+    samples[0] = ToShort(std::lround(sample.l));
     m_quantization_error.l = std::clamp(sample.l - samples[0], -1.0f, 1.0f);
 
     sample.r += samples[1] + m_quantization_error.r;
-    samples[1] = ToShort(sample.r);
+    samples[1] = ToShort(std::lround(sample.r));
     m_quantization_error.r = std::clamp(sample.r - samples[1], -1.0f, 1.0f);
 
     samples += 2;

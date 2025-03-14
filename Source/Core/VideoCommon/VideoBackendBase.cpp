@@ -13,13 +13,13 @@
 
 #include "Common/ChunkFile.h"
 #include "Common/CommonTypes.h"
-#include "Common/Event.h"
 #include "Common/FileUtil.h"
 #include "Common/Logging/Log.h"
 
 #include "Core/Config/MainSettings.h"
 #include "Core/ConfigManager.h"
 #include "Core/Core.h"
+#include "Core/CoreTiming.h"
 #include "Core/DolphinAnalytics.h"
 #include "Core/System.h"
 
@@ -46,18 +46,16 @@
 #include "VideoCommon/BoundingBox.h"
 #include "VideoCommon/CPMemory.h"
 #include "VideoCommon/CommandProcessor.h"
+#include "VideoCommon/EFBInterface.h"
 #include "VideoCommon/Fifo.h"
 #include "VideoCommon/FrameDumper.h"
 #include "VideoCommon/FramebufferManager.h"
 #include "VideoCommon/GeometryShaderManager.h"
 #include "VideoCommon/GraphicsModSystem/Runtime/GraphicsModManager.h"
-#include "VideoCommon/IndexGenerator.h"
 #include "VideoCommon/OnScreenDisplay.h"
-#include "VideoCommon/OpcodeDecoding.h"
 #include "VideoCommon/PixelEngine.h"
 #include "VideoCommon/PixelShaderManager.h"
 #include "VideoCommon/Present.h"
-#include "VideoCommon/RenderBase.h"
 #include "VideoCommon/TMEM.h"
 #include "VideoCommon/TextureCacheBase.h"
 #include "VideoCommon/VertexLoaderManager.h"
@@ -91,12 +89,6 @@ std::string VideoBackendBase::BadShaderFilename(const char* shader_stage, int co
                      g_video_backend->GetName(), counter);
 }
 
-void VideoBackendBase::Video_ExitLoop()
-{
-  auto& system = Core::System::GetInstance();
-  system.GetFifo().ExitGpuLoop();
-}
-
 // Run from the CPU thread (from VideoInterface.cpp)
 void VideoBackendBase::Video_OutputXFB(u32 xfb_addr, u32 fb_width, u32 fb_stride, u32 fb_height,
                                        u64 ticks)
@@ -114,6 +106,7 @@ void VideoBackendBase::Video_OutputXFB(u32 xfb_addr, u32 fb_width, u32 fb_stride
     e.swap_event.fbWidth = fb_width;
     e.swap_event.fbStride = fb_stride;
     e.swap_event.fbHeight = fb_height;
+    e.swap_event.presentation_time = system.GetCoreTiming().GetTargetHostTime(ticks);
     AsyncRequests::GetInstance()->PushEvent(e, false);
   }
 }
@@ -187,7 +180,7 @@ u16 VideoBackendBase::Video_GetBoundingBox(int index)
     }
     warn_once = false;
   }
-  else if (!g_ActiveConfig.backend_info.bSupportsBBox)
+  else if (!g_backend_info.bSupportsBBox)
   {
     static bool warn_once = true;
     if (warn_once)
@@ -298,9 +291,9 @@ void VideoBackendBase::PopulateBackendInfo(const WindowSystemInfo& wsi)
   g_Config.Refresh();
   // Reset backend_info so if the backend forgets to initialize something it doesn't end up using
   // a value from the previously used renderer
-  g_Config.backend_info = {};
+  g_backend_info = {};
   ActivateBackend(Config::Get(Config::MAIN_GFX_BACKEND));
-  g_Config.backend_info.DisplayName = g_video_backend->GetDisplayName();
+  g_backend_info.DisplayName = g_video_backend->GetDisplayName();
   g_video_backend->InitBackendInfo(wsi);
   // We validate the config after initializing the backend info, as system-specific settings
   // such as anti-aliasing, or the selected adapter may be invalid, and should be checked.
@@ -331,11 +324,11 @@ bool VideoBackendBase::InitializeShared(std::unique_ptr<AbstractGfx> gfx,
                                         std::unique_ptr<PerfQueryBase> perf_query,
                                         std::unique_ptr<BoundingBox> bounding_box)
 {
-  // All hardware backends use the default RendererBase and TextureCacheBase.
+  // All hardware backends use the default EFBInterface and TextureCacheBase.
   // Only Null and Software backends override them
 
   return InitializeShared(std::move(gfx), std::move(vertex_manager), std::move(perf_query),
-                          std::move(bounding_box), std::make_unique<Renderer>(),
+                          std::move(bounding_box), std::make_unique<HardwareEFBInterface>(),
                           std::make_unique<TextureCacheBase>());
 }
 
@@ -343,7 +336,7 @@ bool VideoBackendBase::InitializeShared(std::unique_ptr<AbstractGfx> gfx,
                                         std::unique_ptr<VertexManagerBase> vertex_manager,
                                         std::unique_ptr<PerfQueryBase> perf_query,
                                         std::unique_ptr<BoundingBox> bounding_box,
-                                        std::unique_ptr<Renderer> renderer,
+                                        std::unique_ptr<EFBInterfaceBase> efb_interface,
                                         std::unique_ptr<TextureCacheBase> texture_cache)
 {
   memset(reinterpret_cast<u8*>(&g_main_cp_state), 0, sizeof(g_main_cp_state));
@@ -358,9 +351,9 @@ bool VideoBackendBase::InitializeShared(std::unique_ptr<AbstractGfx> gfx,
   g_perf_query = std::move(perf_query);
   g_bounding_box = std::move(bounding_box);
 
-  // Null and Software Backends supply their own derived Renderer and Texture Cache
+  // Null and Software Backends supply their own derived EFBInterface and TextureCache
   g_texture_cache = std::move(texture_cache);
-  g_renderer = std::move(renderer);
+  g_efb_interface = std::move(efb_interface);
 
   g_presenter = std::make_unique<VideoCommon::Presenter>();
   g_frame_dumper = std::make_unique<FrameDumper>();
@@ -372,7 +365,7 @@ bool VideoBackendBase::InitializeShared(std::unique_ptr<AbstractGfx> gfx,
   if (!g_vertex_manager->Initialize() || !g_shader_cache->Initialize() ||
       !g_perf_query->Initialize() || !g_presenter->Initialize() ||
       !g_framebuffer_manager->Initialize() || !g_texture_cache->Initialize() ||
-      (g_ActiveConfig.backend_info.bSupportsBBox && !g_bounding_box->Initialize()) ||
+      (g_backend_info.bSupportsBBox && !g_bounding_box->Initialize()) ||
       !g_graphics_mod_manager->Initialize())
   {
     PanicAlertFmtT("Failed to initialize renderer classes");
@@ -424,7 +417,7 @@ void VideoBackendBase::ShutdownShared()
   g_framebuffer_manager.reset();
   g_shader_cache.reset();
   g_vertex_manager.reset();
-  g_renderer.reset();
+  g_efb_interface.reset();
   g_widescreen.reset();
   g_presenter.reset();
   g_gfx.reset();

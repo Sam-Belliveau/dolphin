@@ -13,8 +13,8 @@
 #include "Common/Logging/Log.h"
 #include "Common/Swap.h"
 #include "Core/Config/MainSettings.h"
-#include "Core/ConfigManager.h"
-#include "VideoCommon/PerformanceMetrics.h"
+#include "Core/Core.h"
+#include "Core/System.h"
 
 static u32 DPL2QualityToFrameBlockSize(AudioCommon::DPL2Quality quality)
 {
@@ -60,20 +60,16 @@ void Mixer::DoState(PointerWrap& p)
 // Executed from sound stream thread
 void Mixer::MixerFifo::Mix(s16* samples, std::size_t num_samples)
 {
-  const uint32_t half = 0x80000000;
+  constexpr u32 half = 0x80000000;
 
-  uint64_t out_sample_rate = m_mixer->m_output_sample_rate;
-  uint64_t in_sample_rate = FIXED_SAMPLE_RATE_DIVIDEND / m_input_sample_rate_divisor;
+  const u64 out_sample_rate = m_mixer->m_output_sample_rate;
+  u64 in_sample_rate = FIXED_SAMPLE_RATE_DIVIDEND / m_input_sample_rate_divisor;
 
-  float emulation_speed = m_mixer->m_config_emulation_speed;
+  const float emulation_speed = m_mixer->m_config_emulation_speed;
   if (0 < emulation_speed && emulation_speed != 1.0)
-    in_sample_rate = static_cast<uint64_t>(std::llround(in_sample_rate * emulation_speed));
+    in_sample_rate = static_cast<u64>(std::llround(in_sample_rate * emulation_speed));
 
-  /* TODO: Check for framerate Rounding */
-  if (false)
-    in_sample_rate = (1001 * in_sample_rate) / 1000;
-
-  uint32_t index_jump = (in_sample_rate << GRANULE_BUFFER_FRAC_BITS) / (out_sample_rate);
+  const u32 index_jump = (in_sample_rate << GRANULE_BUFFER_FRAC_BITS) / (out_sample_rate);
 
   const StereoPair volume{m_LVolume.load() / 256.0f, m_RVolume.load() / 256.0f};
 
@@ -154,8 +150,8 @@ void Mixer::MixerFifo::PushSamples(const s16* samples, std::size_t num_samples)
 {
   while (num_samples-- > 0)
   {
-    s16 l = m_little_endian ? samples[1] : Common::swap16(samples[1]);
-    s16 r = m_little_endian ? samples[0] : Common::swap16(samples[0]);
+    const s16 l = m_little_endian ? samples[1] : Common::swap16(samples[1]);
+    const s16 r = m_little_endian ? samples[0] : Common::swap16(samples[0]);
 
     m_buffer[m_buffer_index] = StereoPair(l, r);
     m_buffer_index = (m_buffer_index + 1) & GRANULE_BUFFER_MASK;
@@ -171,7 +167,7 @@ void Mixer::PushSamples(const s16* samples, std::size_t num_samples)
   m_dma_mixer.PushSamples(samples, num_samples);
   if (m_log_dsp_audio)
   {
-    s32 sample_rate_divisor = m_dma_mixer.GetInputSampleRateDivisor();
+    const s32 sample_rate_divisor = m_dma_mixer.GetInputSampleRateDivisor();
     auto volume = m_dma_mixer.GetVolume();
     m_wave_writer_dsp.AddStereoSamplesBE(samples, static_cast<u32>(num_samples),
                                          sample_rate_divisor, volume.first, volume.second);
@@ -183,7 +179,7 @@ void Mixer::PushStreamingSamples(const s16* samples, std::size_t num_samples)
   m_streaming_mixer.PushSamples(samples, num_samples);
   if (m_log_dtk_audio)
   {
-    s32 sample_rate_divisor = m_streaming_mixer.GetInputSampleRateDivisor();
+    const s32 sample_rate_divisor = m_streaming_mixer.GetInputSampleRateDivisor();
     auto volume = m_streaming_mixer.GetVolume();
     m_wave_writer_dtk.AddStereoSamplesBE(samples, static_cast<u32>(num_samples),
                                          sample_rate_divisor, volume.first, volume.second);
@@ -404,7 +400,7 @@ void Mixer::MixerFifo::Dequeue(Granule* granule)
   // window /= window.max()
   // elements = ", ".join([f"{x:.10f}f" for x in window])
   // print(f'constexpr std::array<StereoPair, {len(window)}> FADE_WINDOW = {{ {elements} }};')
-  constexpr std::array<StereoPair, 32> FADE_WINDOW = {
+  constexpr std::array<float, 32> FADE_WINDOW = {
       1.0000000000f, 0.9999999932f, 0.9999998472f, 0.9999982765f, 0.9999870876f, 0.9999278274f,
       0.9996794215f, 0.9988227502f, 0.9963278433f, 0.9900772448f, 0.9764215513f, 0.9501402658f,
       0.9052392639f, 0.8367449916f, 0.7430540364f, 0.6277889467f, 0.5000000000f, 0.3722110533f,
@@ -417,7 +413,9 @@ void Mixer::MixerFifo::Dequeue(Granule* granule)
 
   if (next_tail == m_queue_head.load(std::memory_order_acquire))
   {
-    if (m_mixer->m_audio_fill_gaps)
+    // Only fill gaps when running to prevent stutter on pause.
+    const bool is_running = Core::GetState(Core::System::GetInstance()) == Core::State::Running;
+    if (m_mixer->m_audio_fill_gaps && is_running)
     {
       next_tail = (tail + GRANULE_QUEUE_SIZE / 2) % GRANULE_QUEUE_SIZE;
       m_queue_looping.store(true, std::memory_order_relaxed);
@@ -435,7 +433,7 @@ void Mixer::MixerFifo::Dequeue(Granule* granule)
     m_queue_fade_index = 0;
 
   *granule = m_queue[tail];
-  *granule *= FADE_WINDOW[m_queue_fade_index];
+  *granule *= StereoPair(FADE_WINDOW[m_queue_fade_index]);
 
   m_queue_tail.store(next_tail, std::memory_order_release);
 }
@@ -451,7 +449,7 @@ constexpr Mixer::MixerFifo::Granule::Granule(const GranuleBuffer& input,
   // elements = ", ".join([f"{x:.10f}f" for x in window])
   // print(f'constexpr std::array<StereoPair, GRANULE_BUFFER_SIZE> GRANULE_WINDOW = {{ {elements}
   // }};')
-  constexpr std::array<StereoPair, GRANULE_BUFFER_SIZE> GRANULE_WINDOW = {
+  constexpr std::array<float, GRANULE_BUFFER_SIZE> GRANULE_WINDOW = {
       0.0000016272f, 0.0000050749f, 0.0000113187f, 0.0000216492f, 0.0000377350f, 0.0000616906f,
       0.0000961509f, 0.0001443499f, 0.0002102045f, 0.0002984010f, 0.0004144844f, 0.0005649486f,
       0.0007573262f, 0.0010002765f, 0.0013036694f, 0.0016786636f, 0.0021377783f, 0.0026949534f,
@@ -496,14 +494,11 @@ constexpr Mixer::MixerFifo::Granule::Granule(const GranuleBuffer& input,
       0.0002984010f, 0.0002102045f, 0.0001443499f, 0.0000961509f, 0.0000616906f, 0.0000377350f,
       0.0000216492f, 0.0000113187f, 0.0000050749f, 0.0000016272f};
 
-  auto buffer_middle = m_buffer.begin() + start_index;
-  auto input_middle = input.end() - start_index;
-
-  std::copy(input_middle, input.end(), m_buffer.begin());
-  std::copy(input.begin(), input_middle, buffer_middle);
+  const auto input_middle = input.end() - start_index;
+  std::ranges::rotate_copy(input, input_middle, m_buffer.begin());
 
   for (std::size_t i = 0; i < m_buffer.size(); ++i)
-    m_buffer[i] *= GRANULE_WINDOW[i];
+    m_buffer[i] *= StereoPair(GRANULE_WINDOW[i]);
 }
 
 Mixer::MixerFifo::StereoPair Mixer::MixerFifo::Granule::InterpStereoPair(const Granule& prev,
@@ -532,12 +527,12 @@ Mixer::MixerFifo::StereoPair Mixer::MixerFifo::Granule::InterpStereoPair(const G
   StereoPair s5 = prev.m_buffer[(prev_index + 3) & GRANULE_BUFFER_MASK] +
                   next.m_buffer[(next_index + 3) & GRANULE_BUFFER_MASK];
 
-  s0 *= (+0.0f + 1.0f * t1 - 2.0f * t2 + 1.0f * t3) / 12.0f;
-  s1 *= (+0.0f - 8.0f * t1 + 15.0f * t2 - 7.0f * t3) / 12.0f;
-  s2 *= (+3.0f + 0.0f * t1 - 7.0f * t2 + 4.0f * t3) / 3.0f;
-  s3 *= (+0.0f + 2.0f * t1 + 5.0f * t2 - 4.0f * t3) / 3.0f;
-  s4 *= (+0.0f - 1.0f * t1 - 6.0f * t2 + 7.0f * t3) / 12.0f;
-  s5 *= (+0.0f + 0.0f * t1 + 1.0f * t2 - 1.0f * t3) / 12.0f;
+  s0 *= StereoPair{(+0.0f + 1.0f * t1 - 2.0f * t2 + 1.0f * t3) / 12.0f};
+  s1 *= StereoPair{(+0.0f - 8.0f * t1 + 15.0f * t2 - 7.0f * t3) / 12.0f};
+  s2 *= StereoPair{(+3.0f + 0.0f * t1 - 7.0f * t2 + 4.0f * t3) / 3.0f};
+  s3 *= StereoPair{(+0.0f + 2.0f * t1 + 5.0f * t2 - 4.0f * t3) / 3.0f};
+  s4 *= StereoPair{(+0.0f - 1.0f * t1 - 6.0f * t2 + 7.0f * t3) / 12.0f};
+  s5 *= StereoPair{(+0.0f + 0.0f * t1 + 1.0f * t2 - 1.0f * t3) / 12.0f};
 
   return s0 + s1 + s2 + s3 + s4 + s5;
 }

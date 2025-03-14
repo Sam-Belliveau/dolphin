@@ -8,7 +8,6 @@
 #include <atomic>
 #include <bit>
 #include <cmath>
-#include <numbers>
 
 #include "AudioCommon/SurroundDecoder.h"
 #include "AudioCommon/WaveFile.h"
@@ -64,26 +63,27 @@ private:
     static constexpr std::size_t GRANULE_QUEUE_SIZE = 20;
 
     template <typename T>
-    static inline s16 ToShort(const T x)
+    static s16 ToShort(const T x)
     {
       return static_cast<s16>(std::clamp<T>(x, static_cast<T>(std::numeric_limits<s16>::min()),
                                             static_cast<T>(std::numeric_limits<s16>::max())));
     }
     struct StereoPair final
     {
-      float l, r;
+      float l = 0.f;
+      float r = 0.f;
 
-      constexpr StereoPair() : l(0), r(0){};
-      constexpr StereoPair(float mono) : l(mono), r(mono) {}
+      constexpr StereoPair() = default;
+      constexpr explicit StereoPair(float mono) : l(mono), r(mono) {}
       constexpr StereoPair(float left, float right) : l(left), r(right) {}
       constexpr StereoPair(s16 left, s16 right) : l(left), r(right) {}
 
-      inline StereoPair operator+(const StereoPair& other) const
+      StereoPair operator+(const StereoPair& other) const
       {
         return StereoPair(l + other.l, r + other.r);
       }
 
-      inline StereoPair& operator*=(const StereoPair& other)
+      StereoPair& operator*=(const StereoPair& other)
       {
         l *= other.l;
         r *= other.r;
@@ -101,16 +101,11 @@ private:
     {
     public:
       constexpr Granule() = default;
-      constexpr Granule(const Granule&) = default;
-      constexpr Granule& operator=(const Granule&) = default;
-      constexpr Granule(Granule&&) = default;
-      constexpr Granule& operator=(Granule&&) = default;
+      constexpr Granule(const GranuleBuffer& input, std::size_t start_index);
 
-      constexpr Granule(const GranuleBuffer& input, const std::size_t start_index);
+      static StereoPair InterpStereoPair(const Granule& front, const Granule& back, u32 frac);
 
-      static StereoPair InterpStereoPair(const Granule& front, const Granule& back, const u32 frac);
-
-      inline Granule& operator*=(const StereoPair& x)
+      Granule& operator*=(const StereoPair& x)
       {
         for (auto& sample : m_buffer)
           sample *= x;

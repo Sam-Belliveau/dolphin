@@ -910,7 +910,7 @@ void AchievementManager::LeaderboardEntriesCallback(int result, const char* erro
     map_entry.username.assign(response_entry.user);
     memcpy(map_entry.score.data(), response_entry.display, FORMAT_SIZE);
     map_entry.rank = response_entry.rank;
-    if (ix == list->user_index)
+    if (static_cast<int32_t>(ix) == list->user_index)
       leaderboard.player_index = response_entry.rank;
   }
   AchievementManager::GetInstance().m_update_callback({.leaderboards = {*leaderboard_id}});
@@ -1152,7 +1152,7 @@ void AchievementManager::HandleGameCompletedEvent(const rc_client_event_t* clien
 
 void AchievementManager::HandleResetEvent(const rc_client_event_t* client_event)
 {
-  INFO_LOG_FMT(ACHIEVEMENTS, "Reset requested by Achievement Mananger");
+  INFO_LOG_FMT(ACHIEVEMENTS, "Reset requested by Achievement Manager");
   Core::Stop(Core::System::GetInstance());
 }
 

@@ -99,7 +99,7 @@ static size_t s_state_writes_in_queue;
 static std::condition_variable s_state_write_queue_is_empty;
 
 // Don't forget to increase this after doing changes on the savestate system
-constexpr u32 STATE_VERSION = 170;  // Last changed in PR 13219
+constexpr u32 STATE_VERSION = 171;  // Last changed in PR 13416
 
 // Increase this if the StateExtendedHeader definition changes
 constexpr u32 EXTENDED_HEADER_VERSION = 1;  // Last changed in PR 12217
@@ -813,7 +813,7 @@ static void LoadFileStateData(const std::string& filename, std::vector<u8>& ret_
   {
   case CompressionType::LZ4:
   {
-    Core::DisplayMessage("Decompressing State...", 500);
+    Core::DisplayMessage("Decompressing State...", OSD::Duration::SHORT);
     if (!DecompressLZ4(buffer, extended_header.base_header.uncompressed_size, f))
       return;
 

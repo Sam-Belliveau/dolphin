@@ -4,6 +4,7 @@
 #include "Core/NetPlayClient.h"
 
 #include <algorithm>
+#include <array>
 #include <cstddef>
 #include <cstring>
 #include <fstream>
@@ -36,6 +37,7 @@
 
 #include "Core/ActionReplay.h"
 #include "Core/Boot/Boot.h"
+#include "Core/Config/GraphicsSettings.h"
 #include "Core/Config/MainSettings.h"
 #include "Core/Config/NetplaySettings.h"
 #include "Core/Config/SessionSettings.h"
@@ -158,7 +160,7 @@ NetPlayClient::NetPlayClient(const std::string& address, const u16 port, NetPlay
       return;
     }
 
-    // Update time in milliseconds of no acknoledgment of
+    // Update time in milliseconds of no acknowledgment of
     // sent packets before a connection is deemed disconnected
     enet_peer_timeout(m_server, 0, PEER_TIMEOUT.count(), PEER_TIMEOUT.count());
 
@@ -221,7 +223,7 @@ NetPlayClient::NetPlayClient(const std::string& address, const u16 port, NetPlay
         case ENET_EVENT_TYPE_CONNECT:
           m_server = netEvent.peer;
 
-          // Update time in milliseconds of no acknoledgment of
+          // Update time in milliseconds of no acknowledgment of
           // sent packets before a connection is deemed disconnected
           enet_peer_timeout(m_server, 0, PEER_TIMEOUT.count(), PEER_TIMEOUT.count());
 
@@ -325,7 +327,7 @@ bool NetPlayClient::Connect()
 static void ReceiveSyncIdentifier(sf::Packet& spac, SyncIdentifier& sync_identifier)
 {
   // We use a temporary variable here due to a potential long vs long long mismatch
-  sf::Uint64 dol_elf_size;
+  u64 dol_elf_size;
   spac >> dol_elf_size;
   sync_identifier.dol_elf_size = dol_elf_size;
 
@@ -607,7 +609,7 @@ void NetPlayClient::OnChunkedDataPayload(sf::Packet& packet)
   sf::Packet progress_packet;
   progress_packet << MessageID::ChunkedDataProgress;
   progress_packet << cid;
-  progress_packet << sf::Uint64{data_packet.getDataSize()};
+  progress_packet << u64{data_packet.getDataSize()};
   Send(progress_packet, CHUNKED_DATA_CHANNEL);
 }
 
@@ -1303,7 +1305,7 @@ void NetPlayClient::OnSyncSaveDataGBA(sf::Packet& packet)
 
 void NetPlayClient::OnSyncCodes(sf::Packet& packet)
 {
-  // Recieve Data Packet
+  // Receive Data Packet
   SyncCodeID sub_id;
   packet >> sub_id;
 
@@ -1529,7 +1531,7 @@ void NetPlayClient::Send(const sf::Packet& packet, const u8 channel_id)
 
 void NetPlayClient::DisplayPlayersPing()
 {
-  if (!g_ActiveConfig.bShowNetPlayPing)
+  if (!Config::Get(Config::GFX_SHOW_NETPLAY_PING))
     return;
 
   OSD::AddTypedMessage(OSD::MessageType::NetPlayPing, fmt::format("Ping: {}", GetPlayersMaxPing()),
@@ -2526,7 +2528,7 @@ void NetPlayClient::SendTimeBase()
 
   if (netplay_client->m_timebase_frame % 60 == 0)
   {
-    const sf::Uint64 timebase = Core::System::GetInstance().GetSystemTimers().GetFakeTimeBase();
+    const u64 timebase = Core::System::GetInstance().GetSystemTimers().GetFakeTimeBase();
 
     sf::Packet packet;
     packet << MessageID::TimeBase;
@@ -2668,9 +2670,10 @@ std::string GetPlayerMappingString(PlayerId pid, const PadMappingArray& pad_map,
       wiimote_slots.push_back(i + 1);
   }
   std::vector<std::string> groups;
-  for (const auto& [group_name, slots] :
-       {std::make_pair("GC", &gc_slots), std::make_pair("GBA", &gba_slots),
-        std::make_pair("Wii", &wiimote_slots)})
+  std::array<std::pair<std::string, std::vector<size_t>*>, 3> slot_groups = {
+      {{"GC", &gc_slots}, {"GBA", &gba_slots}, {"Wii", &wiimote_slots}}};
+
+  for (const auto& [group_name, slots] : slot_groups)
   {
     if (!slots->empty())
       groups.emplace_back(fmt::format("{}{}", group_name, fmt::join(*slots, ",")));

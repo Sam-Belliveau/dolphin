@@ -60,8 +60,8 @@ private:
 
   class MixerFifo final
   {
-    static constexpr std::size_t MAX_GRANULE_QUEUE_SIZE = 256;
-    static constexpr std::size_t GRANULE_QUEUE_MASK = MAX_GRANULE_QUEUE_SIZE - 1;
+    static constexpr std::size_t MAX_QUEUE_SIZE = 256 * 256;
+    static constexpr std::size_t MAX_QUEUE_SIZE_MASK = MAX_QUEUE_SIZE - 1;
 
     struct StereoPair final
     {
@@ -83,19 +83,22 @@ private:
         return StereoPair(l + other.l, r + other.r);
       }
 
+      StereoPair operator-(const StereoPair& other) const
+      {
+        return StereoPair(l - other.l, r - other.r);
+      }
+
       StereoPair operator*(const StereoPair& other) const
       {
         return StereoPair(l * other.l, r * other.r);
       }
+
+
+      float dot(const StereoPair& other) const
+      {
+        return l * other.l + r * other.r;
+      }
     };
-
-    static constexpr std::size_t GRANULE_SIZE = 256;
-    static constexpr std::size_t GRANULE_OVERLAP = GRANULE_SIZE / 2;
-    static constexpr std::size_t GRANULE_MASK = GRANULE_SIZE - 1;
-    static constexpr std::size_t GRANULE_BITS = std::countr_one(GRANULE_MASK);
-    static constexpr std::size_t GRANULE_FRAC_BITS = 32 - GRANULE_BITS;
-
-    using Granule = std::array<StereoPair, GRANULE_SIZE>;
 
   public:
     MixerFifo(Mixer* mixer, u32 sample_rate_divisor, bool little_endian)
@@ -116,21 +119,18 @@ private:
     u32 m_input_sample_rate_divisor;
     bool m_little_endian;
 
-    Granule m_next_buffer{};
-    std::size_t m_next_buffer_index = 0;
+    std::array<StereoPair, MAX_QUEUE_SIZE> m_queue;
 
-    u32 m_current_index = 0;
-    Granule m_front, m_back;
-
-    std::atomic<std::size_t> m_granule_queue_size{20};
-    std::array<Granule, MAX_GRANULE_QUEUE_SIZE> m_queue;
+    double m_queue_tail_frac = 0.0;
     std::atomic<std::size_t> m_queue_head{0};
     std::atomic<std::size_t> m_queue_tail{0};
-    std::atomic<bool> m_queue_looping{false};
-    float m_fade_volume = 1.0;
 
-    void Enqueue();
-    void Dequeue(Granule* granule);
+    std::atomic<bool> m_queue_looping{false};
+
+    float m_fade_volume = 1.0;
+    StereoPair m_dc_balance = StereoPair{0.0};
+
+    inline StereoPair Dequeue(double index_jump);
 
     // Volume ranges from 0-256
     std::atomic<s32> m_LVolume{256};

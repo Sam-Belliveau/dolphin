@@ -15,7 +15,7 @@ add_library(audiocommon
   ${CMAKE_SOURCE_DIR}/Externals/rubberband/single/RubberBandSingle.cpp
 )
 
-target_compile_definitions(audiocommon PRIVATE USE_KISSFFT NO_EXCEPTIONS)
+target_compile_definitions(audiocommon PRIVATE USE_KISSFFT NO_EXCEPTIONS NO_THREADING)
 
 if(APPLE)
   find_library(ACCELERATE_FRAMEWORK Accelerate)

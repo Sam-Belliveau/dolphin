@@ -37,10 +37,28 @@ Mixer::Mixer(u32 BackendSampleRate)
       m_surround_decoder(BackendSampleRate,
                          DPL2QualityToFrameBlockSize(Config::Get(Config::MAIN_DPL2_QUALITY))),
       m_stretcher(BackendSampleRate, 2,
-                  RubberBand::RubberBandStretcher::OptionProcessRealTime)
+                  RubberBand::RubberBandStretcher::OptionProcessRealTime |
+                      RubberBand::RubberBandStretcher::OptionEngineFiner |
+                      RubberBand::RubberBandStretcher::OptionChannelsTogether |
+                      RubberBand::RubberBandStretcher::OptionWindowShort)
 {
   m_config_changed_callback_id = Config::AddConfigChangedCallback([this] { RefreshConfig(); });
   RefreshConfig();
+
+  // 1) After construction (or on sample-rate change):
+  size_t pad = m_stretcher.getPreferredStartPad();
+  std::vector<float> zeroBuf(pad * 2, 0.0f);
+  float* padPtrs[2] = {zeroBuf.data(), zeroBuf.data()};
+  m_stretcher.process(padPtrs, pad, false);
+
+  // 2) Immediately retrieve and discard the “delay” samples so that available() can climb:
+  size_t delay = m_stretcher.getStartDelay();
+  if (delay > 0)
+  {
+    std::vector<float> discard(delay * 2);
+    float* outPtrs[2] = {discard.data(), discard.data()};
+    m_stretcher.retrieve(outPtrs, delay);
+  }
 
   INFO_LOG_FMT(AUDIO_INTERFACE, "Mixer is initialized");
 }
@@ -159,36 +177,47 @@ std::size_t Mixer::Mix(s16* samples, std::size_t num_samples)
     return 0;
 
   const float est_samples = m_dma_mixer.GetSamplesSinceLastCall();
-  const float est_rate = est_samples / static_cast<float>(num_samples);
-  m_output_rate += 0.01f * (est_rate - m_output_rate);
+  const float est_rate = static_cast<float>(num_samples) / est_samples;
+  m_output_rate = std::clamp(m_output_rate + 0.1f * (est_rate - m_output_rate), 0.1f, 10.f);
 
   // 2) Update Rubber Band’s time ratio
-  m_stretcher.setTimeRatio(1.0 / m_output_rate);
+  m_stretcher.setTimeRatio(m_output_rate);
 
-  while (m_stretcher.available() < num_samples)
-  {
-    // Ensure we have enough samples in the stretcher
-    std::size_t needed_samples = m_stretcher.getSamplesRequired();
-
-    std::vector<float> left_buffer(needed_samples, 0.f);
-    std::vector<float> right_buffer(needed_samples, 0.f);
-
-    m_dma_mixer.Mix(left_buffer.data(), right_buffer.data(), needed_samples);
-    m_streaming_mixer.Mix(left_buffer.data(), right_buffer.data(), needed_samples);
-    m_wiimote_speaker_mixer.Mix(left_buffer.data(), right_buffer.data(), needed_samples);
-    m_skylander_portal_mixer.Mix(left_buffer.data(), right_buffer.data(), needed_samples);
-    for (auto& mixer : m_gba_mixers)
-      mixer.Mix(left_buffer.data(), right_buffer.data(), needed_samples);
-
-    const float* input_pointers[2] = {left_buffer.data(), right_buffer.data()};
-    m_stretcher.process(input_pointers, needed_samples, false);
-  }
-
-  std::vector<float> stretched_left_buffer(num_samples);
-  std::vector<float> stretched_right_buffer(num_samples);
-
+  std::vector<float> stretched_left_buffer(num_samples, 0.f);
+  std::vector<float> stretched_right_buffer(num_samples, 0.f);
   float* output_pointers[2] = {stretched_left_buffer.data(), stretched_right_buffer.data()};
-  m_stretcher.retrieve(output_pointers, num_samples);
+
+  int remaining_samples = num_samples;
+  while (remaining_samples > 0)
+  {
+    const std::size_t samples_returned = m_stretcher.retrieve(output_pointers, remaining_samples);
+    remaining_samples -= samples_returned;
+    output_pointers[0] += samples_returned;
+    output_pointers[1] += samples_returned;
+
+    if (samples_returned <= 0)
+    {
+      std::size_t needed_samples = m_stretcher.getSamplesRequired();
+      std::size_t estimated_samples =
+          1 + static_cast<std::size_t>(remaining_samples / m_output_rate);
+
+      if (needed_samples < estimated_samples)
+        needed_samples = estimated_samples;
+
+      std::vector<float> left_buffer(needed_samples, 0.f);
+      std::vector<float> right_buffer(needed_samples, 0.f);
+
+      m_dma_mixer.Mix(left_buffer.data(), right_buffer.data(), needed_samples);
+      m_streaming_mixer.Mix(left_buffer.data(), right_buffer.data(), needed_samples);
+      m_wiimote_speaker_mixer.Mix(left_buffer.data(), right_buffer.data(), needed_samples);
+      m_skylander_portal_mixer.Mix(left_buffer.data(), right_buffer.data(), needed_samples);
+      for (auto& mixer : m_gba_mixers)
+        mixer.Mix(left_buffer.data(), right_buffer.data(), needed_samples);
+
+      const float* input_pointers[2] = {left_buffer.data(), right_buffer.data()};
+      m_stretcher.process(input_pointers, needed_samples, false);
+    }
+  }
 
   // Convert the float samples to s16
   for (std::size_t i = 0; i < num_samples; ++i)
@@ -475,12 +504,8 @@ float Mixer::MixerFifo::GetSamplesSinceLastCall()
   double in_sample_rate =
       static_cast<double>(FIXED_SAMPLE_RATE_DIVIDEND) / m_input_sample_rate_divisor;
 
-  const double emulation_speed = m_mixer->m_config_emulation_speed;
-  if (0 < emulation_speed && emulation_speed != 1.0)
-    in_sample_rate *= emulation_speed;
-
   const float result = static_cast<float>(m_samples_generated) * out_sample_rate / in_sample_rate;
-  m_samples_generated = 0;  // Reset the counter after reading it
+  m_samples_generated = 1;  // Reset the counter after reading it
 
   return result;
 }

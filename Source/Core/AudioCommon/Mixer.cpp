@@ -35,7 +35,9 @@ static u32 DPL2QualityToFrameBlockSize(AudioCommon::DPL2Quality quality)
 Mixer::Mixer(u32 BackendSampleRate)
     : m_output_sample_rate(BackendSampleRate),
       m_surround_decoder(BackendSampleRate,
-                         DPL2QualityToFrameBlockSize(Config::Get(Config::MAIN_DPL2_QUALITY)))
+                         DPL2QualityToFrameBlockSize(Config::Get(Config::MAIN_DPL2_QUALITY))),
+      m_stretcher(BackendSampleRate, 2,
+                  RubberBand::RubberBandStretcher::OptionProcessRealTime)
 {
   m_config_changed_callback_id = Config::AddConfigChangedCallback([this] { RefreshConfig(); });
   RefreshConfig();
@@ -59,7 +61,7 @@ void Mixer::DoState(PointerWrap& p)
 }
 
 // Executed from sound stream thread
-void Mixer::MixerFifo::Mix(s16* samples, std::size_t num_samples)
+void Mixer::MixerFifo::Mix(float* left_samples, float* right_samples, std::size_t num_samples)
 {
   constexpr u32 INDEX_HALF = 0x80000000;
   constexpr DT_s FADE_IN_RC = DT_s(0.008);
@@ -145,16 +147,9 @@ void Mixer::MixerFifo::Mix(s16* samples, std::size_t num_samples)
     // Apply the fade volume and the regular volume to the sample
     sample = sample * volume * StereoPair{m_fade_volume};
 
-    // This quantization method prevents accumulated error but does not do noise shaping.
-    sample.l += samples[0] - m_quantization_error.l;
-    samples[0] = MathUtil::SaturatingCast<s16>(std::lround(sample.l));
-    m_quantization_error.l = std::clamp(samples[0] - sample.l, -1.0f, 1.0f);
-
-    sample.r += samples[1] - m_quantization_error.r;
-    samples[1] = MathUtil::SaturatingCast<s16>(std::lround(sample.r));
-    m_quantization_error.r = std::clamp(samples[1] - sample.r, -1.0f, 1.0f);
-
-    samples += 2;
+    // Multiply the sample by 2^-15 to convert it to the range of [-1.0, 1.0].
+    *(left_samples++) += sample.l * 0.000030517578125;
+    *(right_samples++) += sample.r * 0.000030517578125;
   }
 }
 
@@ -163,14 +158,46 @@ std::size_t Mixer::Mix(s16* samples, std::size_t num_samples)
   if (!samples)
     return 0;
 
-  memset(samples, 0, num_samples * 2 * sizeof(s16));
+  const float est_samples = m_dma_mixer.GetSamplesSinceLastCall();
+  const float est_rate = est_samples / static_cast<float>(num_samples);
+  m_output_rate += 0.01f * (est_rate - m_output_rate);
 
-  m_dma_mixer.Mix(samples, num_samples);
-  m_streaming_mixer.Mix(samples, num_samples);
-  m_wiimote_speaker_mixer.Mix(samples, num_samples);
-  m_skylander_portal_mixer.Mix(samples, num_samples);
-  for (auto& mixer : m_gba_mixers)
-    mixer.Mix(samples, num_samples);
+  // 2) Update Rubber Band’s time ratio
+  m_stretcher.setTimeRatio(1.0 / m_output_rate);
+
+  while (m_stretcher.available() < num_samples)
+  {
+    // Ensure we have enough samples in the stretcher
+    std::size_t needed_samples = m_stretcher.getSamplesRequired();
+
+    std::vector<float> left_buffer(needed_samples, 0.f);
+    std::vector<float> right_buffer(needed_samples, 0.f);
+
+    m_dma_mixer.Mix(left_buffer.data(), right_buffer.data(), needed_samples);
+    m_streaming_mixer.Mix(left_buffer.data(), right_buffer.data(), needed_samples);
+    m_wiimote_speaker_mixer.Mix(left_buffer.data(), right_buffer.data(), needed_samples);
+    m_skylander_portal_mixer.Mix(left_buffer.data(), right_buffer.data(), needed_samples);
+    for (auto& mixer : m_gba_mixers)
+      mixer.Mix(left_buffer.data(), right_buffer.data(), needed_samples);
+
+    const float* input_pointers[2] = {left_buffer.data(), right_buffer.data()};
+    m_stretcher.process(input_pointers, needed_samples, false);
+  }
+
+  std::vector<float> stretched_left_buffer(num_samples);
+  std::vector<float> stretched_right_buffer(num_samples);
+
+  float* output_pointers[2] = {stretched_left_buffer.data(), stretched_right_buffer.data()};
+  m_stretcher.retrieve(output_pointers, num_samples);
+
+  // Convert the float samples to s16
+  for (std::size_t i = 0; i < num_samples; ++i)
+  {
+    // Clamp the float samples to the s16 range
+    samples[0] = MathUtil::SaturatingCast<s16>(stretched_left_buffer[i] * 32768.0f);
+    samples[1] = MathUtil::SaturatingCast<s16>(stretched_right_buffer[i] * 32768.0f);
+    samples += 2;
+  }
 
   return num_samples;
 }
@@ -207,6 +234,8 @@ std::size_t Mixer::MixSurround(float* samples, std::size_t num_samples)
 
 void Mixer::MixerFifo::PushSamples(const s16* samples, std::size_t num_samples)
 {
+  m_samples_generated += num_samples;
+
   while (num_samples-- > 0)
   {
     const s16 l = m_little_endian ? samples[1] : Common::swap16(samples[1]);
@@ -438,6 +467,22 @@ void Mixer::MixerFifo::SetVolume(u32 lvolume, u32 rvolume)
 std::pair<s32, s32> Mixer::MixerFifo::GetVolume() const
 {
   return std::make_pair(m_LVolume.load(), m_RVolume.load());
+}
+
+float Mixer::MixerFifo::GetSamplesSinceLastCall()
+{
+  const double out_sample_rate = m_mixer->m_output_sample_rate;
+  double in_sample_rate =
+      static_cast<double>(FIXED_SAMPLE_RATE_DIVIDEND) / m_input_sample_rate_divisor;
+
+  const double emulation_speed = m_mixer->m_config_emulation_speed;
+  if (0 < emulation_speed && emulation_speed != 1.0)
+    in_sample_rate *= emulation_speed;
+
+  const float result = static_cast<float>(m_samples_generated) * out_sample_rate / in_sample_rate;
+  m_samples_generated = 0;  // Reset the counter after reading it
+
+  return result;
 }
 
 void Mixer::MixerFifo::Enqueue()

@@ -14,6 +14,8 @@
 #include "Common/CommonTypes.h"
 #include "Common/Config/Config.h"
 
+#include "rubberband/RubberBandStretcher.h"
+
 class PointerWrap;
 
 class Mixer final
@@ -105,11 +107,13 @@ private:
     }
     void DoState(PointerWrap& p);
     void PushSamples(const s16* samples, std::size_t num_samples);
-    void Mix(s16* samples, std::size_t num_samples);
+    void Mix(float* left_samples, float* right_samples, std::size_t num_samples);
     void SetInputSampleRateDivisor(u32 rate_divisor);
     u32 GetInputSampleRateDivisor() const;
     void SetVolume(u32 lvolume, u32 rvolume);
     std::pair<s32, s32> GetVolume() const;
+
+    float GetSamplesSinceLastCall();
 
   private:
     Mixer* m_mixer;
@@ -128,6 +132,8 @@ private:
     std::atomic<std::size_t> m_queue_tail{0};
     std::atomic<bool> m_queue_looping{false};
     float m_fade_volume = 1.0;
+
+    std::size_t m_samples_generated = 1;
 
     void Enqueue();
     void Dequeue(Granule* granule);
@@ -158,6 +164,10 @@ private:
 
   bool m_log_dtk_audio = false;
   bool m_log_dsp_audio = false;
+
+  RubberBand::RubberBandStretcher m_stretcher;
+
+  float m_output_rate = 1.0;
 
   float m_config_emulation_speed;
   bool m_config_fill_audio_gaps;

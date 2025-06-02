@@ -701,6 +701,8 @@ dolphin_find_optional_system_library_pkgconfig(lz4 liblz4>=1.8 LZ4::LZ4 External
 
 dolphin_find_optional_system_library_pkgconfig(SPNG spng spng::spng Externals/libspng)
 
+include_directories(Externals/rubberband)
+
 # Using static FreeSurround from Externals
 # There is no system FreeSurround library.
 message(STATUS "Using static FreeSurround from Externals")

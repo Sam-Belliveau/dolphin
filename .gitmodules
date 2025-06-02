@@ -90,3 +90,9 @@
 [submodule "Externals/zstd/zstd"]
 	path = Externals/zstd/zstd
 	url = https://github.com/facebook/zstd.git
+[submodule "Externals/bungee"]
+	path = Externals/bungee
+	url = git@github.com:bungee-audio-stretch/bungee.git
+[submodule "Externals/rubberband"]
+	path = Externals/rubberband
+	url = git@github.com:breakfastquay/rubberband.git

@@ -11,7 +11,20 @@ add_library(audiocommon
   NullSoundStream.h
   WaveFile.cpp
   WaveFile.h
+
+  ${CMAKE_SOURCE_DIR}/Externals/rubberband/single/RubberBandSingle.cpp
 )
+
+target_compile_definitions(audiocommon PRIVATE USE_KISSFFT NO_EXCEPTIONS)
+
+if(APPLE)
+  find_library(ACCELERATE_FRAMEWORK Accelerate)
+  if(ACCELERATE_FRAMEWORK)
+    target_link_libraries(audiocommon PRIVATE ${ACCELERATE_FRAMEWORK})
+  else()
+    message(FATAL_ERROR "Accelerate.framework not found; Dolphin's Rubber Band support requires vDSP")
+  endif()
+endif()
 
 if(ENABLE_CUBEB)
   message(STATUS "Cubeb found, enabling Cubeb sound backend")
